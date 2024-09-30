@@ -55,15 +55,15 @@ class AttackBuffer:
         self.buffer = [] # elements are (loss: float, optim_ids: Tensor)
         self.size = size
 
-    def add(self, loss: float, optim_ids: Tensor) -> None:
+    def add(self, loss: float, optim_ids: Tensor, contrastive_loss:float=None) -> None:
         if self.size == 0:
-            self.buffer = [(loss, optim_ids)]
+            self.buffer = [(loss, optim_ids, contrastive_loss)]
             return
 
         if len(self.buffer) < self.size:
-            self.buffer.append((loss, optim_ids))
+            self.buffer.append((loss, optim_ids, contrastive_loss))
         else:
-            self.buffer[-1] = (loss, optim_ids)
+            self.buffer[-1] = (loss, optim_ids, contrastive_loss)
 
         self.buffer.sort(key=lambda x: x[0])
 
@@ -78,11 +78,13 @@ class AttackBuffer:
     
     def log_buffer(self, tokenizer):
         message = "buffer:"
-        for loss, ids in self.buffer:
+        for loss, ids, loss_contr in self.buffer:
             optim_str = tokenizer.batch_decode(ids)[0]
             optim_str = optim_str.replace("\\", "\\\\")
             optim_str = optim_str.replace("\n", "\\n")
             message += f"\nloss: {loss}" + f" | string: {optim_str}"
+            if loss_contr:
+                message += f"\n target loss: {loss+loss_contr} contra loss: {loss_contr}"
         logger.info(message)
 
 def sample_ids_from_grad(
@@ -261,6 +263,7 @@ class GCG:
         optim_ids = buffer.get_best_ids()
 
         losses = []
+        contr_losses = []
         optim_strings = []
         
         for _ in tqdm(range(config.num_steps)):
@@ -305,19 +308,26 @@ class GCG:
                     input_embeds_contr = torch.cat([
                         contr_before_embeds.repeat(new_search_width, 1, 1),
                         embedding_layer(sampled_ids),
-                        after_embeds.repeat(new_search_width, 1, 1)
+                        contr_after_embeds.repeat(new_search_width, 1, 1)
                     ], dim=1)
 
-                    loss_contr = find_executable_batch_size(self.compute_candidates_loss, batch_size)(input_embeds)
-                    loss = loss = loss_contr
+                    loss_contr = find_executable_batch_size(self.compute_candidates_loss, batch_size)(input_embeds_contr)
+                    loss = loss - loss_contr
 
                 current_loss = loss.min().item()
                 optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
 
+                if self.contrastive:
+                    contr_losses.append(loss_contr[loss.argmin()])
+
                 # Update the buffer based on the loss
                 losses.append(current_loss)
+                
                 if buffer.size == 0 or current_loss < buffer.get_highest_loss():
-                    buffer.add(current_loss, optim_ids)
+                    if self.contrastive:
+                        buffer.add(current_loss, optim_ids, contrastive_loss=loss_contr.max().item())
+                    else:
+                        buffer.add(current_loss, optim_ids)
 
             optim_ids = buffer.get_best_ids()
             optim_str = tokenizer.batch_decode(optim_ids)[0]
@@ -428,8 +438,8 @@ class GCG:
         loss = -logits
 
         if self.contrastive:
-            input_embeds = torch.cat([self.contr_before_embeds, optim_embeds, self.after_embeds], dim=1)
-            output_contrastive = model(inputs_embeds=input_embeds)
+            contr_input_embeds = torch.cat([self.contr_before_embeds, optim_embeds, self.contr_before_embeds], dim=1)
+            output_contrastive = model(inputs_embeds=contr_input_embeds)
             loss = loss + output_contrastive.logits
 
         optim_ids_onehot_grad = torch.autograd.grad(outputs=[loss], inputs=[optim_ids_onehot])[0]
