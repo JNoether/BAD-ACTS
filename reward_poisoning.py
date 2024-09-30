@@ -10,6 +10,7 @@ args = ArgumentParser()
 args.add_argument("data", type=str)
 args.add_argument("--question", default="question", type=str)
 args.add_argument("--target", default="target", type=str)
+args.add_argument("--contrast", type=str)
 args.add_argument("--device", default="cuda", type=str)
 args.add_argument("--rew-model", default='Ray2333/reward-model-Mistral-7B-instruct-Unified-Feedback', type=str)
 args.add_argument("--cache-dir", default= '../nobackup/models', type=str)
@@ -41,14 +42,24 @@ for conversation in data:
     {"role": "assistant", "content": target}
     ]
 
+    if args.contrast:
+        contr = conversation[args.contrast]
+        message_contrast = [  
+        {"role": "user", "content": prompt_adv},
+        {"role": "assistant", "content": contr}    
+        ]
+    else:
+        message_contrast = None
+
     config = GCGConfig(
-    num_steps = 1000,
+    num_steps = 250,
     use_prefix_cache=False,
     batch_size=1024,
     allow_non_ascii=False,
+    topk = 1024
     )
 
-    res = rewGCG.nanogcg.run(model, tokenizer, messages_adv, config=config)
+    res = rewGCG.nanogcg.run(model, tokenizer, messages_adv, contrastive_messages=message_contrast, config=config)
     suffixes[conversation[args.question]] = res.best_string
 
 if args.out_dir:
