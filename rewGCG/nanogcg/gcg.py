@@ -228,22 +228,23 @@ class GCG:
     def run(
         self,
         messages: Union[str, List[dict]],
-        # contrastive_messages: Union[str, None]=None
+        contrastive_messages: Union[str, None]=None
     ) -> GCGResult:
         model = self.model
         tokenizer = self.tokenizer
         embedding_layer = self.embedding_layer
         config = self.config
+        self.contrastive = bool(contrastive_messages)
 
         if config.seed is not None:
             set_seed(config.seed)
             torch.use_deterministic_algorithms(True, warn_only=True)
     
         before_embeds, after_embeds = self.preprocess_messages(messages=messages)
-        # if contrastive_messages:
-        #     contr_before_embeds, contr_after_embeds = self.preprocess_messages(messages=contrastive_messages)
-        #     self.contr_before_embeds = contr_before_embeds
-        #     self.contr_after_embeds = contr_after_embeds
+        if contrastive_messages:
+            contr_before_embeds, contr_after_embeds = self.preprocess_messages(messages=contrastive_messages)
+            self.contr_before_embeds = contr_before_embeds
+            self.contr_after_embeds = contr_after_embeds
         
         # Compute the KV Cache for tokens that appear before the optimized tokens
         if config.use_prefix_cache:
@@ -299,6 +300,16 @@ class GCG:
                         # target_embeds.repeat(new_search_width, 1, 1),
                     ], dim=1)
                 loss = find_executable_batch_size(self.compute_candidates_loss, batch_size)(input_embeds)
+
+                if self.contrastive:
+                    input_embeds_contr = torch.cat([
+                        contr_before_embeds.repeat(new_search_width, 1, 1),
+                        embedding_layer(sampled_ids),
+                        after_embeds.repeat(new_search_width, 1, 1)
+                    ], dim=1)
+
+                    loss_contr = find_executable_batch_size(self.compute_candidates_loss, batch_size)(input_embeds)
+                    loss = loss = loss_contr
 
                 current_loss = loss.min().item()
                 optim_ids = sampled_ids[loss.argmin()].unsqueeze(0)
@@ -414,8 +425,12 @@ class GCG:
             output = model(inputs_embeds=input_embeds)
 
         logits = output.logits
-
         loss = -logits
+
+        if self.contrastive:
+            input_embeds = torch.cat([self.contr_before_embeds, optim_embeds, self.after_embeds], dim=1)
+            output_contrastive = model(inputs_embeds=input_embeds)
+            loss = loss + output_contrastive.logits
 
         optim_ids_onehot_grad = torch.autograd.grad(outputs=[loss], inputs=[optim_ids_onehot])[0]
 
@@ -448,10 +463,10 @@ class GCG:
                     outputs = self.model(inputs_embeds=input_embeds_batch)
                 else:
                     outputs = self.model(inputs_embeds=input_embeds_batch)
-
                 logits = outputs.logits
                 loss = -logits
-                
+
+
                 all_loss.append(loss)
 
                 del outputs
@@ -465,6 +480,7 @@ def run(
     model: transformers.PreTrainedModel,
     tokenizer: transformers.PreTrainedTokenizer,
     messages: Union[str, List[dict]],
+    contrastive_messages: Union[str, None]=None,
     config: Optional[GCGConfig] = None, 
 ) -> GCGResult:
     """Generates a single optimized string using GCG. 
@@ -485,6 +501,6 @@ def run(
     logger.setLevel(getattr(logging, config.verbosity))
     
     gcg = GCG(model, tokenizer, config)
-    result = gcg.run(messages)
+    result = gcg.run(messages, contrastive_messages)
     return result
     
