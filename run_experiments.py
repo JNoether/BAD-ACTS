@@ -12,6 +12,7 @@ from agents.adversarial_agent import AdversarialAgent
 from agents.guardian_agent import GuardianAgent
 import random
 import json
+import os
 
 if __name__=="__main__":
     args = ArgumentParser()
@@ -106,5 +107,7 @@ if __name__=="__main__":
         results.append(curr_res)
          
     # save results
+    if not "results" in os.listdir():
+        os.mkdir("results")
     with open(f"results/{args.model_client}_{args.environment}_{len(target_actions)}_{args.adversarial_agent}_{'safe' if args.safe else ''}_{'_GUARDIAN' if args.guardian else ''}{args.id if args.id else ""}.json", "w") as f:
         json.dump(results, f)
